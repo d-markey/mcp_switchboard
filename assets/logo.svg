@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160" role="img" aria-label="mcp-switchboard logo">
+  <line x1="92" y1="80" x2="136" y2="40" stroke="#4a5266" stroke-width="3"/>
+  <line x1="92" y1="80" x2="136" y2="80" stroke="#4a5266" stroke-width="3"/>
+  <line x1="92" y1="80" x2="136" y2="120" stroke="#4a5266" stroke-width="3"/>
+  <circle cx="136" cy="40" r="7" fill="#2a3040" stroke="#4a5266" stroke-width="2"/>
+  <circle cx="136" cy="80" r="7" fill="#2a3040" stroke="#4a5266" stroke-width="2"/>
+  <circle cx="136" cy="120" r="7" fill="#2a3040" stroke="#4a5266" stroke-width="2"/>
+  <circle cx="92" cy="80" r="10" fill="#7c5cff"/>
+  <line x1="16" y1="80" x2="70" y2="80" stroke="#5fd4b8" stroke-width="4"/>
+  <polygon points="70,68 92,80 70,92" fill="#5fd4b8"/>
+</svg>
