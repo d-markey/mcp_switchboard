@@ -233,3 +233,42 @@ fn test_common_shape_with_one_row_missing_several_keys_still_converts() {
         "| id | name | score |\n| --- | --- | --- |\n| 1 | a | 9.5 |\n| 2 | b | 7.1 |\n| 3 | c | 8.0 |\n| 4 |  |  |\n"
     );
 }
+
+#[test]
+fn test_table_rewrite_min_fill() {
+    // 2 rows, 3 columns: a, b, c. Total 6 cells.
+    // Row 1: a, b (2)
+    // Row 2: c (1)
+    // Total filled: 3. Ratio: 3/6 = 0.5. Should pass.
+    let data = json!([
+        {"a": 1, "b": 2},
+        {"c": 3}
+    ]);
+    let text = serde_json::to_string(&data).unwrap();
+    let result = try_convert_json_table(&text);
+    assert!(result.is_some());
+    let table = result.unwrap();
+    assert!(table.contains("| a | b | c |"));
+    assert!(table.contains("| 1 | 2 |  |"));
+    assert!(table.contains("|  |  | 3 |"));
+
+    // Below 0.5 ratio
+    let sparse_data = json!([
+        {"a": 1},
+        {"b": 2},
+        {"c": 3},
+        {"d": 4}
+    ]);
+    let text = serde_json::to_string(&sparse_data).unwrap();
+    let result = try_convert_json_table(&text);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_json_repair() {
+    // Over-escaped newlines: literal \n instead of control character
+    let text = r#"[{"a": 1}\n,{"a": 2}]"#;
+    let result = try_convert_json_table(text);
+    assert!(result.is_some());
+    assert!(result.unwrap().contains("| 1 |"));
+}

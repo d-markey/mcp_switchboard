@@ -10,32 +10,26 @@ use axum::{
     Json,
 };
 use reqwest::Client;
+use serde_json::json;
 use std::sync::Arc;
 
 use crate::config::BackendConfig;
-use crate::transform::maybe_rewrite_json_body;
+use crate::transform::{maybe_rewrite_json_body, maybe_rewrite_json_body_async};
 use crate::tool_filter::is_tool_allowed;
 use crate::tool_search::{build_tools_list_result, rewrite_call_tool_request, CALL_TOOL_NAME, DESCRIBE_TOOLS_NAME};
 use crate::backend_logging::{log_proxy_request, log_proxy_response};
+use crate::backend_stats::BackendStatsRegistry;
+use crate::jsonrpc::{get_method, get_params, get_arguments, McpMethod};
+use crate::http_utils::is_excluded_header;
 
 #[derive(Clone)]
 pub struct AppState {
     pub backends: Arc<std::collections::HashMap<String, BackendConfig>>,
     pub client: Client,
+    pub backend_stats: BackendStatsRegistry,
 }
 
-// Hop-by-hop headers that should not be forwarded to upstreams per RFC 2616 specification rules.
-const EXCLUDED_HEADERS: &[&str] = &[
-    "content-length",
-    "content-encoding",
-    "connection",
-    "transfer-encoding",
-    "host",
-];
-
 /// The main router dispatcher endpoint.
-/// Extracts target backend from URL path segments, sanitizes incoming transport headers,
-/// detects if the payload is a special tool inquiry method, and processes stream or static results.
 pub async fn proxy_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -48,33 +42,36 @@ pub async fn proxy_handler(
         None => return StatusCode::NOT_FOUND.into_response(),
     };
 
+    state.backend_stats.inc_request(&name);
+    struct PendingGuard {
+        backend_stats: BackendStatsRegistry,
+        backend_name: String,
+    }
+    impl Drop for PendingGuard {
+        fn drop(&mut self) {
+            self.backend_stats.dec_pending(&self.backend_name);
+        }
+    }
+    let _pending_guard = PendingGuard {
+        backend_stats: state.backend_stats.clone(),
+        backend_name: name.clone(),
+    };
+
     let url = &backend.url;
 
     if let Some(level) = backend.resolved_log_level {
-        log_proxy_request(
-            level,
-            &name,
-            method.as_str(),
-            url,
-            &headers,
-            &backend.log_headers,
-        );
+        log_proxy_request(level, &name, method.as_str(), url, &headers, &backend.log_headers);
     }
 
     let mut req_builder = state.client.request(method.clone(), url);
     for (key, val) in &headers {
-        let key_str = key.as_str().to_lowercase();
-        if EXCLUDED_HEADERS.contains(&key_str.as_str()) {
-            continue;
-        }
-        // Conditionally exclude origin tracking headers based on server config constraints to handle strict CORS.
-        if key_str == "origin" && !backend.forward_origin {
+        let key_str = key.as_str();
+        if is_excluded_header(key_str) || (key_str.eq_ignore_ascii_case("origin") && !backend.forward_origin) {
             continue;
         }
         req_builder = req_builder.header(key, val);
     }
 
-    // Inject static custom authentication keys declared in our config file if not already provided by the client.
     for (k, v) in &backend.headers {
         if !headers.contains_key(k) {
             req_builder = req_builder.header(k, v);
@@ -87,37 +84,37 @@ pub async fn proxy_handler(
     };
 
     let mut tool_call_id = None;
+    let mut is_tool_call = false;
     let final_body = if method == Method::POST {
         if let Ok(mut json_val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
             tool_call_id = crate::jsonrpc::tool_call_request_id(&json_val);
+            is_tool_call = tool_call_id.is_some();
 
-            if let Some(method_str) = json_val.get("method").and_then(|v| v.as_str()) {
-                if method_str == "tools/list" {
-                    // Intercept tool enumeration: if tool search mode is active, return the two meta-tools.
+            match get_method(&json_val) {
+                Some(McpMethod::ToolsList) => {
                     if backend.use_tool_search {
                         return handle_tools_list_synthetic(&state.client, &backend, &name, &json_val).await;
                     } else if backend.tools.is_some() {
-                        // Otherwise apply typical flat whitelist/blacklist filtering before returning schemas.
                         return handle_tools_list_filtered(&state.client, &backend, &json_val).await;
                     }
-                } else if method_str == "tools/call" {
-                    if let Some(params) = json_val.get("params") {
+                }
+                Some(McpMethod::ToolsCall) => {
+                    if let Some(params) = get_params(&json_val) {
                         if let Some(tool_name) = params.get("name").and_then(|v| v.as_str()) {
                             if tool_name == DESCRIBE_TOOLS_NAME {
-                                // Handled locally inside Switchboard, never forwarded upstream.
                                 return handle_describe_tools(&state.client, &backend, &name, &json_val).await;
                             } else if tool_name == CALL_TOOL_NAME {
-                                if let Some(prefix) = &backend.tool_prefix.clone().or_else(|| Some(name.clone())) {
-                                    if let Some(real_name) = crate::tool_search::strip_prefix(prefix, params.get("arguments").and_then(|a| a.get("name")).and_then(|v| v.as_str()).unwrap_or("")) {
-                                        // Enforce security boundaries over namespaced tool requests.
-                                        if !is_tool_allowed(real_name, backend.tools.as_ref()) {
-                                            return handle_tool_not_found(&json_val, real_name);
-                                        }
+                                let prefix = &backend.tool_prefix;
+                                let inner_name = get_arguments(params).and_then(|a| a.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+                                if let Some(real_name) = crate::tool_search::strip_prefix(prefix, inner_name) {
+                                    if !is_tool_allowed(real_name, backend.tools.as_ref()) {
+                                        return handle_tool_not_found(&json_val, real_name);
                                     }
-                                    rewrite_call_tool_request(&mut json_val, prefix);
+                                } else {
+                                    return handle_tool_not_found(&json_val, inner_name);
                                 }
+                                rewrite_call_tool_request(&mut json_val, prefix);
                             } else {
-                                // Flat non-prefixed tool execution boundary validation check.
                                 if !is_tool_allowed(tool_name, backend.tools.as_ref()) {
                                     return handle_tool_not_found(&json_val, tool_name);
                                 }
@@ -125,6 +122,7 @@ pub async fn proxy_handler(
                         }
                     }
                 }
+                _ => {}
             }
             serde_json::to_vec(&json_val).unwrap_or(body_bytes)
         } else {
@@ -137,7 +135,12 @@ pub async fn proxy_handler(
     req_builder = req_builder.body(final_body);
 
     let resp = match req_builder.send().await {
-        Ok(r) => r,
+        Ok(r) => {
+            if r.status().is_success() || r.status().is_client_error() || r.status().is_server_error() {
+                state.backend_stats.set_status(&name, crate::backend_stats::BackendStatus::Online);
+            }
+            r
+        }
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
 
@@ -145,13 +148,7 @@ pub async fn proxy_handler(
     let resp_headers = resp.headers().clone();
 
     if let Some(level) = backend.resolved_log_level {
-        log_proxy_response(
-            level,
-            &name,
-            status.as_u16(),
-            &resp_headers,
-            &backend.log_headers,
-        );
+        log_proxy_response(level, &name, status.as_u16(), &resp_headers, &backend.log_headers);
     }
 
     let content_type = resp_headers
@@ -160,202 +157,121 @@ pub async fn proxy_handler(
         .unwrap_or("")
         .to_string();
 
-    // Check if the response returned data requires text formatting/compaction (JSON or SSE stream).
+    let backend_stats = state.backend_stats.clone();
+    let backend_name_for_body = name.clone();
+
     let body = if let (Some(mode), Some(request_id)) = (backend.rewrite, tool_call_id) {
-        if content_type.contains("application/json") {
+        if crate::http_utils::is_json_content_type(&content_type) {
             let full_bytes = match resp.bytes().await {
                 Ok(b) => b,
                 Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
             };
+            if is_tool_call { backend_stats.add_tool_call_received_bytes(&backend_name_for_body, full_bytes.len() as u64); }
 
-            let rewritten = if full_bytes.len() > 4096 {
-                let request_id = request_id.clone();
-                let bytes_for_task = full_bytes.clone();
-                tokio::task::spawn_blocking(move || {
-                    maybe_rewrite_json_body(&bytes_for_task, mode, &request_id)
-                })
-                .await
-                .unwrap_or_else(|_| String::from_utf8_lossy(&full_bytes).into_owned())
-            } else {
-                maybe_rewrite_json_body(&full_bytes, mode, &request_id)
-            };
+            let (rewritten, _) = maybe_rewrite_json_body_async(&full_bytes, mode, &request_id).await;
+
+            if is_tool_call { backend_stats.add_tool_call_response_sent_bytes(&backend_name_for_body, rewritten.len() as u64); }
             Body::from(rewritten)
-        } else if content_type.contains("text/event-stream") {
-            // Use active reactive buffering stream to process SSE text lines chunk-by-chunk.
+        } else if crate::http_utils::is_sse_content_type(&content_type) {
+            let stats_reg_clone = backend_stats.clone();
+            let b_name = backend_name_for_body.clone();
+            let is_tc = is_tool_call;
             let stream = crate::sse::SseRelayStream::new(resp.bytes_stream(), move |data: &[u8]| {
-                maybe_rewrite_json_body(data, mode, &request_id)
+                if is_tc { stats_reg_clone.add_tool_call_received_bytes(&b_name, data.len() as u64); }
+                let (rewritten, _) = maybe_rewrite_json_body(data, mode, &request_id);
+                if is_tc { stats_reg_clone.add_tool_call_response_sent_bytes(&b_name, rewritten.len() as u64); }
+                rewritten
             });
             Body::from_stream(stream)
         } else {
-            Body::from_stream(resp.bytes_stream())
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+            };
+            let size = bytes.len() as u64;
+            if is_tool_call {
+                backend_stats.add_tool_call_received_bytes(&backend_name_for_body, size);
+                backend_stats.add_tool_call_response_sent_bytes(&backend_name_for_body, size);
+            }
+            Body::from(bytes)
         }
     } else {
-        Body::from_stream(resp.bytes_stream())
+        if crate::http_utils::is_sse_content_type(&content_type) && is_tool_call {
+            let stats_reg_clone = backend_stats.clone();
+            let b_name = backend_name_for_body.clone();
+            let stream = crate::sse::SseRelayStream::new(resp.bytes_stream(), move |data: &[u8]| {
+                stats_reg_clone.add_tool_call_received_bytes(&b_name, data.len() as u64);
+                String::from_utf8_lossy(data).into_owned()
+            });
+            Body::from_stream(stream)
+        } else {
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+            };
+            let size = bytes.len() as u64;
+            if is_tool_call { backend_stats.add_tool_call_received_bytes(&backend_name_for_body, size); }
+            Body::from(bytes)
+        }
     };
 
     let mut response_builder = Response::builder().status(status);
     for (k, v) in &resp_headers {
-        let k_str = k.as_str().to_lowercase();
-        if EXCLUDED_HEADERS.contains(&k_str.as_str()) {
-            continue;
+        if !is_excluded_header(k.as_str()) {
+            response_builder = response_builder.header(k, v);
         }
-        response_builder = response_builder.header(k, v);
     }
-
-    response_builder
-        .body(body)
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    response_builder.body(body).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 fn handle_tool_not_found(req_json: &serde_json::Value, tool_name: &str) -> Response {
-    let result = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": req_json.get("id"),
-        "result": {
-            "content": [
-                {
-                    "type": "text",
-                    "text": format!("Error: Tool '{}' not found or not allowed", tool_name)
-                }
-            ],
-            "isError": true
-        }
-    });
-    Json(result).into_response()
-}
-
-async fn handle_tools_list_synthetic(
-    client: &Client,
-    backend: &BackendConfig,
-    name: &str,
-    req_json: &serde_json::Value,
-) -> Response {
-    let prefix = backend.tool_prefix.clone().unwrap_or_else(|| name.to_string());
-    let list_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/list",
-        "id": req_json.get("id").unwrap_or(&serde_json::json!(1))
-    });
-
-    let Ok(resp) = client.post(&backend.url).json(&list_req).send().await else {
-        return StatusCode::BAD_GATEWAY.into_response();
-    };
-
-    let Ok(json_resp) = resp.json::<serde_json::Value>().await else {
-        return StatusCode::BAD_GATEWAY.into_response();
-    };
-
-    let tools = json_resp
-        .get("result")
-        .and_then(|r| r.get("tools"))
-        .and_then(|t| t.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let synthetic_result = build_tools_list_result(
-        &tools,
-        &prefix,
-        backend.description.as_deref(),
-        backend.tools.as_ref(),
+    let result = crate::jsonrpc::jsonrpc_tool_error(
+        req_json.get("id"),
+        &format!("Error: Tool '{}' not found or not allowed", tool_name),
     );
-
-    let result = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": req_json.get("id"),
-        "result": synthetic_result
-    });
-
     Json(result).into_response()
 }
 
-async fn handle_tools_list_filtered(
-    client: &Client,
-    backend: &BackendConfig,
-    req_json: &serde_json::Value,
-) -> Response {
-    let list_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/list",
-        "id": req_json.get("id").unwrap_or(&serde_json::json!(1))
-    });
-
-    let Ok(resp) = client.post(&backend.url).json(&list_req).send().await else {
-        return StatusCode::BAD_GATEWAY.into_response();
+async fn handle_tools_list_synthetic(client: &Client, backend: &BackendConfig, _name: &str, req_json: &serde_json::Value) -> Response {
+    let json_resp = match crate::tool_utils::fetch_tools_list(client, &backend.url, &backend.headers, None).await {
+        Ok(j) => j,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
-
-    let Ok(mut json_resp) = resp.json::<serde_json::Value>().await else {
-        return StatusCode::BAD_GATEWAY.into_response();
-    };
-
-    if let Some(result) = json_resp.get_mut("result") {
-        if let Some(tools) = result.get_mut("tools").and_then(|t| t.as_array_mut()) {
-            tools.retain(|t| {
-                if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
-                    is_tool_allowed(name, backend.tools.as_ref())
-                } else {
-                    true
-                }
-            });
-        }
-    }
-
-    let result = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": req_json.get("id"),
-        "result": json_resp.get("result")
-    });
-
+    let tools = json_resp.get("result").and_then(|r| r.get("tools")).and_then(|t| t.as_array()).cloned().unwrap_or_default();
+    let result = crate::jsonrpc::jsonrpc_response(
+        req_json.get("id"),
+        build_tools_list_result(&tools, &backend.tool_prefix, backend.description.as_deref(), backend.tools.as_ref())
+    );
     Json(result).into_response()
 }
 
-async fn handle_describe_tools(
-    client: &Client,
-    backend: &BackendConfig,
-    name: &str,
-    req_json: &serde_json::Value,
-) -> Response {
-    let prefix = backend.tool_prefix.clone().unwrap_or_else(|| name.to_string());
-    let list_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/list",
-        "id": req_json.get("id").unwrap_or(&serde_json::json!(1))
-    });
-
-    let Ok(resp) = client.post(&backend.url).json(&list_req).send().await else {
-        return StatusCode::BAD_GATEWAY.into_response();
+async fn handle_tools_list_filtered(client: &Client, backend: &BackendConfig, req_json: &serde_json::Value) -> Response {
+    let tools = match crate::tool_utils::fetch_and_filter_tools(client, &backend.url, &backend.headers, None).await {
+        Ok(t) => t,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
+    let result = crate::jsonrpc::jsonrpc_response(
+        req_json.get("id"),
+        json!({ "tools": crate::tool_filter::filter_tools(tools, backend.tools.as_ref()) })
+    );
+    Json(result).into_response()
+}
 
-    let Ok(json_resp) = resp.json::<serde_json::Value>().await else {
-        return StatusCode::BAD_GATEWAY.into_response();
+async fn handle_describe_tools(client: &Client, backend: &BackendConfig, _name: &str, req_json: &serde_json::Value) -> Response {
+    let tools = match crate::tool_utils::fetch_and_filter_tools(client, &backend.url, &backend.headers, None).await {
+        Ok(t) => t,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
-
-    let tools = json_resp
-        .get("result")
-        .and_then(|r| r.get("tools"))
-        .and_then(|t| t.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let requested_names: Vec<String> = req_json
-        .get("params")
-        .and_then(|p| p.get("arguments"))
+    let requested_names: Vec<String> = get_params(req_json)
+        .and_then(|p| get_arguments(p))
         .and_then(|a| a.get("names"))
         .and_then(|n| n.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-
-    let synthetic_result = crate::tool_search::build_describe_tools_result(
-        &tools,
-        &requested_names,
-        &prefix,
+    let result = crate::jsonrpc::jsonrpc_response(
+        req_json.get("id"),
+        crate::tool_search::build_describe_tools_result(&tools, &requested_names, &backend.tool_prefix, backend.tools.as_ref())
     );
-
-    let result = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": req_json.get("id"),
-        "result": synthetic_result
-    });
-
     Json(result).into_response()
 }
 
@@ -370,11 +286,9 @@ where
     S: Send + Sync,
 {
     type Rejection = axum::response::Response;
-
     async fn from_request(req: axum::extract::Request, _state: &S) -> Result<Self, Self::Rejection> {
         let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
-            .await
-            .map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+            .await.map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
         Ok(BytesOrString::Bytes(bytes.to_vec()))
     }
 }

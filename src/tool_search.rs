@@ -34,20 +34,25 @@ pub fn strip_prefix<'a>(prefix: &str, name: &'a str) -> Option<&'a str> {
     }
 }
 
+/// Helper to get the filtered and prefixed list of tool names.
+pub fn get_exposed_tool_names(backend_tools: &[Value], prefix: &str, filter: Option<&ToolsFilter>) -> Vec<String> {
+    let mut names: Vec<String> = backend_tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+        .filter(|&name| is_tool_allowed(name, filter))
+        .map(|name| prefixed_tool_name(prefix, name))
+        .collect();
+    names.sort();
+    names
+}
+
 /// Constructs the list of tools that Switchboard will expose to the LLM for a given backend.
 /// Instead of listing every tool from the backend, it returns the two meta-tools:
 /// `describe_tools` and `call_tool`. The description of `describe_tools` contains
 /// the list of available (and filtered) tool names from that backend.
 pub fn build_tools_list_result(backend_tools: &[Value], prefix: &str, description: Option<&str>, filter: Option<&ToolsFilter>) -> Value {
-    let mut names: Vec<String> = backend_tools
-        .iter()
-        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
-        .filter(|&name| is_tool_allowed(name, filter))
-        .map(String::from)
-        .collect();
-    names.sort();
+    let prefixed_names = get_exposed_tool_names(backend_tools, prefix, filter);
 
-    let prefixed_names: Vec<String> = names.iter().map(|n| prefixed_tool_name(prefix, n)).collect();
     let names_line = if prefixed_names.is_empty() {
         "(no tools available)".to_string()
     } else {
@@ -139,23 +144,26 @@ pub fn build_describe_tools_result(
     backend_tools: &[Value],
     requested_names: &[String],
     prefix: &str,
+    filter: Option<&ToolsFilter>,
 ) -> Value {
     let mut described = Vec::new();
     let mut errors = Vec::new();
 
     for req_name in requested_names {
         if let Some(real_name) = strip_prefix(prefix, req_name) {
-            if let Some(tool) = backend_tools
-                .iter()
-                .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(real_name))
-            {
-                let mut modified = tool.clone();
-                if let Some(obj) = modified.as_object_mut() {
-                    // Put the prefixed name back so the LLM knows how to call it via call_tool.
-                    obj.insert("name".to_string(), Value::String(req_name.clone()));
+            if is_tool_allowed(real_name, filter) {
+                if let Some(tool) = backend_tools
+                    .iter()
+                    .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(real_name))
+                {
+                    let mut modified = tool.clone();
+                    if let Some(obj) = modified.as_object_mut() {
+                        // Put the prefixed name back so the LLM knows how to call it via call_tool.
+                        obj.insert("name".to_string(), Value::String(req_name.clone()));
+                    }
+                    described.push(modified);
+                    continue;
                 }
-                described.push(modified);
-                continue;
             }
         }
         errors.push(format!("unknown tool: {}", req_name));

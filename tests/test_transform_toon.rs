@@ -1,4 +1,5 @@
 use mcp_switchboard::transform_toon::try_convert_toon;
+use serde_json::json;
 
 #[test]
 fn test_scalars() {
@@ -109,4 +110,24 @@ fn test_complex_nesting() {
     assert!(output.contains("project: mcp-switchboard"));
     assert!(output.contains("files[2]{name,size}:"));
     assert!(output.contains("tags[2]:"));
+}
+
+#[test]
+fn test_toon_conversion() {
+    let data = json!({
+        "users": [
+            {"id": 1, "name": "Alice"},
+            {"id": 2, "name": "Bob"}
+        ],
+        "meta": {"count": 2}
+    });
+    let text = serde_json::to_string(&data).unwrap();
+    let result = try_convert_toon(&text);
+    assert!(result.is_some());
+    let toon = result.unwrap();
+    assert!(toon.contains("users[2]{id,name}:"));
+    assert!(toon.contains("1,Alice"));
+    assert!(toon.contains("2,Bob"));
+    assert!(toon.contains("meta:"));
+    assert!(toon.contains("count: 2"));
 }

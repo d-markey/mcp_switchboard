@@ -77,6 +77,7 @@ servers:
     description: Expert tools
     rewrite: md_tables     # opt in to JSON/JSONL-to-markdown rewriting
     # rewrite: toon        # OR opt in to TOON (Token-Oriented Object Notation)
+    # rewrite: csv         # OR opt in to CSV (with tab separator)
     use_tool_search: true  # opt in to tool search for this backend
     tool_prefix: expert    # optional; defaults to the server's own name ("expert_tools") above
     forward_origin: true   # forward a browser client's real Origin header to this backend

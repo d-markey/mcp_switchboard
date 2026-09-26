@@ -29,6 +29,31 @@ pub enum RewriteMode {
     MdTables,
     /// Custom token conservation mode or target format transformation.
     Toon,
+    /// Compresses tabular data into CSV format with tab separators.
+    Csv,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct RawBackendConfig {
+    pub url: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub rewrite: Option<RewriteMode>,
+    #[serde(default, rename = "use_tool_search")]
+    pub use_tool_search: bool,
+    #[serde(default)]
+    pub tool_prefix: Option<String>,
+    #[serde(default, rename = "forward_origin")]
+    pub forward_origin: bool,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub tools: Option<ToolsFilter>,
+    #[serde(default, rename = "log_level")]
+    pub log_level: Option<String>,
+    #[serde(default, rename = "log_headers")]
+    pub log_headers: Vec<String>,
 }
 
 /// Holds proxy, authentication, filtering, and rewriting details for a single upstream MCP backend.
@@ -50,7 +75,7 @@ pub struct BackendConfig {
     pub use_tool_search: bool,
     /// Prefix to namespace all tools from this backend. Defaults to backend's name if omitted.
     #[serde(default, rename = "tool_prefix")]
-    pub tool_prefix: Option<String>,
+    pub tool_prefix: String,
     /// Controls whether the incoming `origin` HTTP header is forwarded to prevent CORS issues upstream.
     #[serde(default, rename = "forward_origin")]
     pub forward_origin: bool,
@@ -78,6 +103,14 @@ pub struct CorsConfig {
     pub allow_origins: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct RawAppConfig {
+    #[serde(default)]
+    pub servers: HashMap<String, RawBackendConfig>,
+    #[serde(default)]
+    pub cors: Option<CorsConfig>,
+}
+
 /// The main application configuration model, mirroring the YAML file schema structure.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct AppConfig {
@@ -92,103 +125,130 @@ impl AppConfig {
     /// and validates configuration invariants (like avoiding duplicate prefixes or missing URLs).
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
-        let mut config: AppConfig = serde_yaml::from_str(&content)?;
+        let raw_config: RawAppConfig = serde_yaml::from_str(&content)?;
 
         // A gateway without any backends is a user misconfiguration; we stop early.
-        if config.servers.is_empty() {
+        if raw_config.servers.is_empty() {
             return Err("Config must contain at least one server in 'servers'".into());
         }
 
         // Regex to find variable interpolation markers like `${MY_ENV_VAR}`.
         let env_regex = Regex::new(r"\$\{([^}]+)\}")?;
         let mut used_prefixes = HashSet::new();
+        let mut servers = HashMap::new();
 
-        for (name, backend) in config.servers.iter_mut() {
-            backend.name = name.clone();
+        let expand_env_vars = |val: &str| -> Result<String, Box<dyn std::error::Error>> {
+            let mut new_val = val.to_string();
+            for cap in env_regex.captures_iter(val) {
+                let var_name = &cap[1];
+                let env_val = env::var(var_name).map_err(|_| format!("Undefined environment variable: {}", var_name))?;
+                new_val = new_val.replace(&cap[0], &env_val);
+            }
+            Ok(new_val)
+        };
+
+        for (name, raw_backend) in raw_config.servers {
+            // Substitute dynamic environment variables inside the backend URL.
+            let url = expand_env_vars(&raw_backend.url)?;
 
             // Fail early if target address is missing to avoid routing requests to nowhere.
-            if backend.url.is_empty() {
+            if url.is_empty() {
                 return Err(format!("Backend '{}' missing 'url'", name).into());
             }
 
-            // Standardize prefix behavior so downstream modules can reliably assume its presence.
-            if backend.tool_prefix.is_none() {
-                backend.tool_prefix = Some(name.clone());
+            let tool_prefix = match raw_backend.tool_prefix {
+                Some(p) => {
+                    if p.trim().is_empty() {
+                        return Err(format!("Backend '{}' has empty 'tool_prefix'", name).into());
+                    }
+                    p
+                }
+                None => name.clone(),
+            };
+
+            // If two distinct backends use the same tool_prefix with tool_search enabled,
+            // routing a tool call would become ambiguous or impossible.
+            if raw_backend.use_tool_search && !used_prefixes.insert(tool_prefix.clone()) {
+                return Err(format!("Duplicate tool_prefix '{}' across tool_search backends", tool_prefix).into());
             }
 
-            if let Some(prefix) = &backend.tool_prefix {
-                if prefix.is_empty() {
-                    return Err(format!("Backend '{}' has empty 'tool_prefix'", name).into());
-                }
-                // If two distinct backends use the same tool_prefix with tool_search enabled,
-                // routing a tool call would become ambiguous or impossible.
-                if backend.use_tool_search && !used_prefixes.insert(prefix.clone()) {
-                    return Err(format!("Duplicate tool_prefix '{}' across tool_search backends", prefix).into());
-                }
-            }
-
+            let mut headers = raw_backend.headers;
             // Substitute dynamic environment variables inside the header values.
-            // This prevents hardcoding sensitive secrets or authentication tokens in disk configuration files.
-            for value in backend.headers.values_mut() {
-                let mut new_value = value.clone();
-                for cap in env_regex.captures_iter(value) {
-                    let var_name = &cap[1];
-                    let env_val = env::var(var_name).map_err(|_| format!("Undefined environment variable: {}", var_name))?;
-                    new_value = new_value.replace(&cap[0], &env_val);
-                }
-                *value = new_value;
+            for value in headers.values_mut() {
+                *value = expand_env_vars(value)?;
             }
 
-            // Normalize logging configurations for consistent string matching.
-            if let Some(level) = &backend.log_level {
+            let mut resolved_log_level = None;
+            let mut log_level = raw_backend.log_level;
+            if let Some(level) = &log_level {
                 let lower = level.to_lowercase();
                 match lower.as_str() {
                     "trace" => {
-                        backend.log_level = Some(lower);
-                        backend.resolved_log_level = Some(Level::TRACE);
+                        log_level = Some(lower);
+                        resolved_log_level = Some(Level::TRACE);
                     }
                     "debug" => {
-                        backend.log_level = Some(lower);
-                        backend.resolved_log_level = Some(Level::DEBUG);
+                        log_level = Some(lower);
+                        resolved_log_level = Some(Level::DEBUG);
                     }
                     "info" => {
-                        backend.log_level = Some(lower);
-                        backend.resolved_log_level = Some(Level::INFO);
+                        log_level = Some(lower);
+                        resolved_log_level = Some(Level::INFO);
                     }
                     "warn" => {
-                        backend.log_level = Some(lower);
-                        backend.resolved_log_level = Some(Level::WARN);
+                        log_level = Some(lower);
+                        resolved_log_level = Some(Level::WARN);
                     }
                     "error" => {
-                        backend.log_level = Some(lower);
-                        backend.resolved_log_level = Some(Level::ERROR);
+                        log_level = Some(lower);
+                        resolved_log_level = Some(Level::ERROR);
                     }
                     _ => return Err(format!("Backend '{}' has invalid log_level: {}", name, level).into()),
                 }
             }
 
-            // Lowercase logged header keys so that lookup is case-insensitive (as per HTTP specification).
-            for h in backend.log_headers.iter_mut() {
+            let mut log_headers = raw_backend.log_headers;
+            for h in log_headers.iter_mut() {
                 *h = h.to_lowercase();
             }
 
-            // Sanity check filtering entries to avoid unexpected or invisible wildcard matches.
-            if let Some(filter) = &backend.tools {
+            if let Some(filter) = &raw_backend.tools {
                 for b in &filter.blacklist {
                     if b.is_empty() {
                          return Err(format!("Backend '{}' has empty string in tools blacklist", name).into());
                     }
                 }
             }
+
+            servers.insert(
+                name.clone(),
+                BackendConfig {
+                    name,
+                    url,
+                    description: raw_backend.description,
+                    rewrite: raw_backend.rewrite,
+                    use_tool_search: raw_backend.use_tool_search,
+                    tool_prefix,
+                    forward_origin: raw_backend.forward_origin,
+                    headers,
+                    tools: raw_backend.tools,
+                    log_level,
+                    log_headers,
+                    resolved_log_level,
+                },
+            );
         }
 
         // Validate that CORS, if enabled, specifies actual origins rather than being empty.
-        if let Some(cors) = &config.cors {
+        if let Some(cors) = &raw_config.cors {
             if cors.allow_origins.is_empty() {
                 return Err("CORS 'allow_origins' must not be empty if 'cors' key is present".into());
             }
         }
 
-        Ok(config)
+        Ok(AppConfig {
+            servers,
+            cors: raw_config.cors,
+        })
     }
 }

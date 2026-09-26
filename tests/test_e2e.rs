@@ -1,3 +1,4 @@
+use mcp_switchboard::jsonrpc::jsonrpc_request;
 use axum::{
     routing::post,
     extract::Request,
@@ -10,7 +11,7 @@ use tokio::net::TcpListener;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use serde_json::{json, Value};
-use tokio::process::Command;
+use std::process::Command;
 use tokio::time::{sleep, Duration};
 use reqwest::Client;
 
@@ -135,7 +136,7 @@ async fn spawn_server(router: Router) -> String {
 
 // Spawn switchboard binary process
 struct SwitchboardProcess {
-    child: tokio::process::Child,
+    child: std::process::Child,
     pub base_url: String,
 }
 
@@ -167,7 +168,8 @@ async fn spawn_switchboard(config_path: &std::path::Path) -> SwitchboardProcess 
 
 impl Drop for SwitchboardProcess {
     fn drop(&mut self) {
-        drop(self.child.kill());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -183,16 +185,15 @@ async fn mcp_call_tool(proxy_url: &str, tool_name: &str, arguments: Value, autho
     }
 
     // 1. Initialize
-    let init_body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
+    let init_body = jsonrpc_request(
+        Some(&json!(1)),
+        "initialize",
+        Some(json!({
             "protocolVersion": "2025-06-18",
             "capabilities": {},
             "clientInfo": {"name": "e2e-rust", "version": "0.1.0"}
-        }
-    });
+        }))
+    );
     let resp = client.post(proxy_url).headers(headers.clone()).json(&init_body).send().await.unwrap();
     if !resp.status().is_success() {
         let status = resp.status();
@@ -212,15 +213,14 @@ async fn mcp_call_tool(proxy_url: &str, tool_name: &str, arguments: Value, autho
     let _ = client.post(proxy_url).headers(headers.clone()).json(&notif_body).send().await;
 
     // 3. Call tool
-    let call_body = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
+    let call_body = jsonrpc_request(
+        Some(&json!(2)),
+        "tools/call",
+        Some(json!({
             "name": tool_name,
             "arguments": arguments
-        }
-    });
+        }))
+    );
     let call_resp = client.post(proxy_url).headers(headers).json(&call_body).send().await.unwrap();
     if !call_resp.status().is_success() {
         let status = call_resp.status();
@@ -275,11 +275,11 @@ async fn mcp_list_tools(proxy_url: &str) -> Vec<Value> {
 
     let _ = client.post(proxy_url).headers(headers.clone()).json(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).send().await;
 
-    let list_body = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list"
-    });
+    let list_body = jsonrpc_request(
+        Some(&json!(2)),
+        "tools/list",
+        None
+    );
     let list_resp = client.post(proxy_url).headers(headers).json(&list_body).send().await.unwrap();
     if !list_resp.status().is_success() {
         let status = list_resp.status();
@@ -594,12 +594,11 @@ async fn test_cors_exposes_session_id_header_on_real_response() {
         .header("Origin", "https://allowed.example.com")
         .header("Accept", "application/json, text/event-stream")
         .header("MCP-Protocol-Version", "2025-06-18")
-        .json(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}}
-        }))
+        .json(&jsonrpc_request(
+            Some(&json!(1)),
+            "initialize",
+            Some(json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}}))
+        ))
         .send()
         .await
         .unwrap();
@@ -637,7 +636,7 @@ async fn post_with_origin(url: &str, origin: &str) -> Option<String> {
     let client = Client::new();
     let resp = client.post(url)
         .header("Origin", origin)
-        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call"}))
+        .json(&jsonrpc_request(Some(&json!(1)), "tools/call", None))
         .send()
         .await
         .unwrap();

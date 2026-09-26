@@ -32,7 +32,7 @@ fn parse(text: &str) -> Option<Value> {
         return None;
     }
 
-    if let Ok(val) = serde_json::from_str::<Value>(stripped) {
+    if let Some(val) = crate::http_utils::try_parse_json_with_repair(stripped) {
         return Some(val);
     }
 

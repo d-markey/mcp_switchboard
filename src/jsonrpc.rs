@@ -1,88 +1,186 @@
-//! Helper functions for validating, identifying, and transforming JSON-RPC payloads
-//! used throughout the Model Context Protocol (MCP) message specification.
+//! JSON-RPC 2.0 message parsing and inspection helpers.
 
 use serde_json::Value;
 
-/// Determines if the current incoming conversation should be considered "modern"
-/// based on the client protocol spec version date.
-///
-/// Versions equal to or newer than `2025-06-18` support certain structured schemas
-/// or content handshakes. We look up this configuration either from individual custom headers
-/// or extracted parameter payloads during the initialize handshake.
-pub fn is_modern_request(message: &Value, protocol_version_header: Option<&str>) -> bool {
-    // If header is present, it must be >= 2025-06-18
-    if let Some(header) = protocol_version_header {
-        return is_at_least_version(header, "2025-06-18");
-    }
+/// Known MCP methods
+#[derive(Debug, PartialEq, Eq)]
+pub enum McpMethod {
+    Initialize,
+    ToolsList,
+    ToolsCall,
+    Unknown(String),
+}
 
-    // Fallback to initialize request body
-    if message.get("method").and_then(|v| v.as_str()) == Some("initialize") {
-        if let Some(version) = message.get("params").and_then(|p| p.get("protocolVersion")).and_then(|v| v.as_str()) {
-             return is_at_least_version(version, "2025-06-18");
+impl McpMethod {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "initialize" => McpMethod::Initialize,
+            "tools/list" => McpMethod::ToolsList,
+            "tools/call" => McpMethod::ToolsCall,
+            _ => McpMethod::Unknown(s.to_string()),
         }
     }
 
+    pub fn as_str(&self) -> &str {
+        match self {
+            McpMethod::Initialize => "initialize",
+            McpMethod::ToolsList => "tools/list",
+            McpMethod::ToolsCall => "tools/call",
+            McpMethod::Unknown(s) => s,
+        }
+    }
+}
+
+/// Helper to get method from a JSON-RPC value
+pub fn get_method(val: &Value) -> Option<McpMethod> {
+    val.get("method").and_then(|v| v.as_str()).map(McpMethod::from_str)
+}
+
+/// Helper to get params from a JSON-RPC value
+pub fn get_params(val: &Value) -> Option<&Value> {
+    val.get("params")
+}
+
+/// Helper to get arguments from params
+pub fn get_arguments(params: &Value) -> Option<&Value> {
+    params.get("arguments")
+}
+
+pub fn jsonrpc_request(id: Option<&Value>, method: &str, params: Option<Value>) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("jsonrpc".to_string(), serde_json::Value::String("2.0".to_string()));
+    if let Some(id) = id {
+        if !id.is_null() {
+            obj.insert("id".to_string(), id.clone());
+        }
+    }
+    obj.insert("method".to_string(), serde_json::Value::String(method.to_string()));
+    if let Some(params) = params {
+        obj.insert("params".to_string(), params);
+    }
+    Value::Object(obj)
+}
+
+pub fn jsonrpc_response(id: Option<&Value>, result: Value) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("jsonrpc".to_string(), serde_json::Value::String("2.0".to_string()));
+    if let Some(id) = id {
+        if !id.is_null() {
+            obj.insert("id".to_string(), id.clone());
+        }
+    }
+    obj.insert("result".to_string(), result);
+    Value::Object(obj)
+}
+
+pub fn jsonrpc_error(id: Option<&Value>, code: i64, message: &str) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("jsonrpc".to_string(), serde_json::Value::String("2.0".to_string()));
+    if let Some(id) = id {
+        if !id.is_null() {
+            obj.insert("id".to_string(), id.clone());
+        }
+    }
+    let mut error = serde_json::Map::new();
+    error.insert("code".to_string(), serde_json::Value::Number(code.into()));
+    error.insert("message".to_string(), serde_json::Value::String(message.to_string()));
+    obj.insert("error".to_string(), Value::Object(error));
+    Value::Object(obj)
+}
+
+/// Standardizes tool error responses with `isError: true` and appropriate content formatting.
+pub fn jsonrpc_tool_error(id: Option<&Value>, message: &str) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("jsonrpc".to_string(), serde_json::Value::String("2.0".to_string()));
+    if let Some(id) = id {
+        if !id.is_null() {
+            obj.insert("id".to_string(), id.clone());
+        }
+    }
+    let mut res_obj = serde_json::Map::new();
+    res_obj.insert("content".to_string(), serde_json::json!([{ "type": "text", "text": message }]));
+    res_obj.insert("isError".to_string(), Value::Bool(true));
+    obj.insert("result".to_string(), Value::Object(res_obj));
+    Value::Object(obj)
+}
+
+/// Checks if a JSON-RPC request is a tool call request (i.e., method == "tools/call").
+pub fn is_tool_call_request(val: &Value) -> bool {
+    matches!(get_method(val), Some(McpMethod::ToolsCall))
+}
+
+/// Checks if a JSON-RPC request uses a modern protocol version based on header or params.
+pub fn is_modern_request(val: &Value, protocol_version_header: Option<&str>) -> bool {
+    if let Some(version) = protocol_version_header {
+        if version >= "2025-06-18" {
+            return true;
+        }
+    }
+    if get_method(val) == Some(McpMethod::Initialize) {
+        if let Some(params) = get_params(val) {
+            if let Some(v) = params.get("protocolVersion").and_then(|s| s.as_str()) {
+                return v >= "2025-06-18";
+            }
+        }
+    }
     false
 }
 
-fn is_at_least_version(actual: &str, required: &str) -> bool {
-    actual >= required
-}
-
-/// Extracts the JSON-RPC request identifier if and only if the current payload represents a `tools/call`.
-///
-/// This is used by the proxy module to track request-response mapping pairs so that corresponding
-/// tool execution results can be intercepted and rewritten cleanly on their return trip.
-pub fn tool_call_request_id(message: &Value) -> Option<Value> {
-    if message.get("method").and_then(|v| v.as_str()) == Some("tools/call") {
-        return message.get("id").cloned();
+/// Extracts the request ID from a JSON-RPC request value if present.
+pub fn tool_call_request_id(val: &Value) -> Option<Value> {
+    if is_tool_call_request(val) {
+        val.get("id").cloned()
+    } else {
+        None
     }
-    None
 }
 
-/// Confirms whether a given JSON payload is the exact response block matching a specific tool invocation.
-///
-/// It validates that the transaction IDs match and that the package does not contain a nested `method` block,
-/// indicating that it is a response payload instead of a brand new inbound call request.
-pub fn is_tool_call_response(message: &Value, request_id: &Value) -> bool {
-    if message.get("id") != Some(request_id) {
+/// Checks if a JSON-RPC response corresponds to a tool call response matching the given request ID.
+pub fn is_tool_call_response(val: &Value, request_id: &Value) -> bool {
+    // Must have matching id
+    if val.get("id") != Some(request_id) {
         return false;
     }
-    // Responses do not have "method"
-    if message.get("method").is_some() {
+    // Must not be a request or notification (must not have method)
+    if val.get("method").is_some() {
         return false;
     }
     // Must have result or error
-    message.get("result").is_some() || message.get("error").is_some()
+    val.get("result").is_some() || val.get("error").is_some()
 }
 
-/// Walks through the array blocks inside an MCP `tools/call` response and applies a closure
-/// to rewrite any nested string values.
-///
-/// This is the backbone utility used to apply compactors (like Markdown table conversion or TOON serialization)
-/// to raw data responses, shrinking the raw size before sending them to the LLM client.
-pub fn rewrite_tool_call_result<F>(message: &mut Value, rewriter: F) -> bool
-where F: Fn(&str) -> Option<String>
+/// Rewrites tool call result text content blocks using the provided rewriter closure.
+pub fn rewrite_tool_call_result<F>(val: &mut Value, rewriter: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
 {
+    let Some(result) = val.get_mut("result") else {
+        return false;
+    };
+    let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) else {
+        return false;
+    };
+
     let mut changed = false;
-    if let Some(result) = message.get_mut("result") {
-        if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
-            for block in content {
-                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                        if let Some(rewritten) = rewriter(text) {
-                            block.as_object_mut().unwrap().insert("text".to_string(), Value::String(rewritten));
-                            changed = true;
-                        }
+    for item in content {
+        if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+            if let Some(text_item) = item.get_mut("text") {
+                if let Some(text_val) = text_item.as_str() {
+                    if let Some(rewritten) = rewriter(text_val) {
+                        *text_item = Value::String(rewritten);
+                        changed = true;
                     }
                 }
             }
         }
-        if changed {
-             // If the text description has been compacted, any parallel fields like `structuredContent`
-             // become redundant or out of sync. We remove them to maximize token conservation.
-             result.as_object_mut().unwrap().remove("structuredContent");
+    }
+
+    if changed {
+        // If content was transformed, drop structuredContent to prevent LLM client confusion
+        if let Some(obj) = result.as_object_mut() {
+            obj.remove("structuredContent");
         }
     }
+
     changed
 }

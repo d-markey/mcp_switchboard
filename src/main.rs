@@ -14,6 +14,7 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use mcp_switchboard::config::AppConfig;
 use mcp_switchboard::proxy::{proxy_handler, AppState};
+use mcp_switchboard::backend_stats::BackendStatsRegistry;
 
 /// Version constant for the application
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -56,9 +57,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::builder().build()?;
 
     let backends = Arc::new(app_config.servers);
+
+    // Initialize backend stats and health cache at startup with all counters at 0, empty tools list, and status "waiting".
+    let mut backend_stats = BackendStatsRegistry::new();
+    backend_stats.init_backends(backends.keys());
+
     let state = AppState {
         backends: backends.clone(),
         client,
+        backend_stats,
     };
 
     // Route format captures the backend name dynamically (e.g., /my_backend/mcp)
@@ -69,25 +76,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(proxy_handler)
                 .post(proxy_handler)
                 .delete(proxy_handler),
+        )
+        .route(
+            "/stats",
+            get(mcp_switchboard::backend_stats::stats_handler),
+        )
+        .route(
+            "/health",
+            get(mcp_switchboard::health::health_handler),
         );
 
     // Apply CORS configuration dynamically. This allows web-based LLM clients (like browser extensions or web UIs)
     // to securely interact with the proxy across different origins.
     if let Some(cors_cfg) = app_config.cors {
         if !cors_cfg.allow_origins.is_empty() {
-            let origins: Vec<_> = cors_cfg
-                .allow_origins
-                .iter()
-                .filter_map(|o| o.parse().ok())
-                .collect();
-            let cors = CorsLayer::new()
-                .allow_origin(AllowOrigin::list(origins))
-                .allow_methods(AllowMethods::any())
-                .allow_headers(AllowHeaders::any())
-                .expose_headers([
-                    "mcp-session-id".parse().unwrap(),
-                    "content-type".parse().unwrap(),
-                ]);
+            let cors = if cors_cfg.allow_origins.iter().any(|o| o == "*") {
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::any())
+                    .allow_methods(AllowMethods::any())
+                    .allow_headers(AllowHeaders::any())
+                    .expose_headers([
+                        "mcp-session-id".parse().unwrap(),
+                        "content-type".parse().unwrap(),
+                    ])
+            } else {
+                let origins: Vec<_> = cors_cfg
+                    .allow_origins
+                    .iter()
+                    .filter_map(|o| o.parse().ok())
+                    .collect();
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::list(origins))
+                    .allow_methods(AllowMethods::any())
+                    .allow_headers(AllowHeaders::any())
+                    .expose_headers([
+                        "mcp-session-id".parse().unwrap(),
+                        "content-type".parse().unwrap(),
+                    ])
+            };
             app = app.layer(cors);
         }
     }

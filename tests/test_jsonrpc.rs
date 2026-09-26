@@ -3,41 +3,42 @@ use mcp_switchboard::jsonrpc::{
     is_tool_call_response,
     rewrite_tool_call_result,
     tool_call_request_id,
+    jsonrpc_request,
 };
 use serde_json::json;
 
 #[test]
 fn test_modern_request_recognized_by_header() {
-    let message = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+    let message = jsonrpc_request(Some(&json!(1)), "tools/list", None);
     assert!(is_modern_request(&message, Some("2025-06-18")));
     assert!(is_modern_request(&message, Some("2026-01-01")));
 }
 
 #[test]
 fn test_legacy_request_recognized_by_missing_header() {
-    let message = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+    let message = jsonrpc_request(Some(&json!(1)), "tools/list", None);
     assert!(!is_modern_request(&message, None));
 }
 
 #[test]
 fn test_legacy_header_value_is_legacy() {
-    let message = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+    let message = jsonrpc_request(Some(&json!(1)), "tools/list", None);
     assert!(!is_modern_request(&message, Some("2024-11-05")));
 }
 
 #[test]
 fn test_initialize_request_falls_back_to_body_protocol_version() {
-    let modern_init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}});
-    let legacy_init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}});
+    let modern_init = jsonrpc_request(Some(&json!(1)), "initialize", Some(json!({"protocolVersion": "2025-06-18"})));
+    let legacy_init = jsonrpc_request(Some(&json!(1)), "initialize", Some(json!({"protocolVersion": "2024-11-05"})));
     assert!(is_modern_request(&modern_init, None));
     assert!(!is_modern_request(&legacy_init, None));
 }
 
 #[test]
 fn test_tool_call_request_id_matches_only_tools_call() {
-    assert_eq!(tool_call_request_id(&json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call"})), Some(json!(7)));
-    assert_eq!(tool_call_request_id(&json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})), None);
-    assert_eq!(tool_call_request_id(&json!({"jsonrpc": "2.0", "method": "notifications/progress"})), None);
+    assert_eq!(tool_call_request_id(&jsonrpc_request(Some(&json!(7)), "tools/call", None)), Some(json!(7)));
+    assert_eq!(tool_call_request_id(&jsonrpc_request(Some(&json!(7)), "tools/list", None)), None);
+    assert_eq!(tool_call_request_id(&jsonrpc_request(None, "notifications/progress", None)), None);
 }
 
 #[test]

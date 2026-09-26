@@ -28,13 +28,13 @@ servers:
     assert_eq!(jira.name, "jira");
     assert_eq!(jira.url, "https://jira.example.com/mcp");
     assert_eq!(jira.description.as_deref(), Some("Jira issue tracker"));
-    assert_eq!(jira.tool_prefix.as_deref(), Some("jira"));
+    assert_eq!(jira.tool_prefix, "jira");
 
     let expert = config.servers.get("expert").unwrap();
     assert_eq!(expert.name, "expert");
     assert_eq!(expert.url, "https://expert.example.com/mcp");
     assert_eq!(expert.rewrite, Some(RewriteMode::MdTables));
-    assert_eq!(expert.tool_prefix.as_deref(), Some("expert"));
+    assert_eq!(expert.tool_prefix, "expert");
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn test_loads_use_tool_search() {
 fn test_tool_prefix_defaults_to_backend_name() {
     let file = write_config("servers:\n  jira:\n    url: https://jira.example.com/mcp\n    use_tool_search: true\n");
     let config = AppConfig::load_from_file(file.path()).unwrap();
-    assert_eq!(config.servers.get("jira").unwrap().tool_prefix.as_deref(), Some("jira"));
+    assert_eq!(config.servers.get("jira").unwrap().tool_prefix, "jira");
 }
 
 #[test]
@@ -103,7 +103,7 @@ servers:
     tool_prefix: j
 "#);
     let config = AppConfig::load_from_file(file.path()).unwrap();
-    assert_eq!(config.servers.get("jira").unwrap().tool_prefix.as_deref(), Some("j"));
+    assert_eq!(config.servers.get("jira").unwrap().tool_prefix, "j");
 }
 
 #[test]
@@ -144,7 +144,7 @@ servers:
     tool_prefix: jira
 "#);
     let config = AppConfig::load_from_file(file.path()).unwrap();
-    assert_eq!(config.servers.get("expert").unwrap().tool_prefix.as_deref(), Some("jira"));
+    assert_eq!(config.servers.get("expert").unwrap().tool_prefix, "jira");
 }
 
 #[test]
@@ -361,4 +361,26 @@ fn test_rejects_entry_without_url() {
     // serde_yaml might fail during deserialization if URL is missing and not optional
     let result = AppConfig::load_from_file(file.path());
     assert!(result.is_err());
+}
+
+#[test]
+fn test_config_parsing() {
+    let yaml = r#"
+servers:
+  test_server:
+    url: http://localhost:9000/mcp
+    description: Test Server
+    rewrite: md_tables
+    use_tool_search: true
+cors:
+  allow_origins:
+    - https://example.com
+"#;
+    let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.servers.contains_key("test_server"));
+    let backend = config.servers.get("test_server").unwrap();
+    assert_eq!(backend.url, "http://localhost:9000/mcp");
+    assert_eq!(backend.rewrite, Some(RewriteMode::MdTables));
+    assert!(backend.use_tool_search);
+    assert_eq!(config.cors.unwrap().allow_origins, vec!["https://example.com"]);
 }

@@ -2,6 +2,7 @@ use mcp_switchboard::tool_search::{
     build_describe_tools_result, build_tools_list_result, call_tool_target_name,
     describe_tools_call_names, rewrite_call_tool_request, CALL_TOOL_NAME, DESCRIBE_TOOLS_NAME,
 };
+use mcp_switchboard::jsonrpc::jsonrpc_request;
 use serde_json::{json, Value};
 
 fn backend_tools() -> Vec<Value> {
@@ -56,7 +57,7 @@ fn test_tools_list_result_omits_backend_description_when_none() {
 
 #[test]
 fn test_describe_tools_result_returns_schema_for_known_prefixed_name() {
-    let result = build_describe_tools_result(&backend_tools(), &["jira::get_table".to_string()], "jira");
+    let result = build_describe_tools_result(&backend_tools(), &["jira::get_table".to_string()], "jira", None);
     assert_eq!(result["isError"], false);
     let described: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(described["name"], "jira::get_table");
@@ -65,7 +66,7 @@ fn test_describe_tools_result_returns_schema_for_known_prefixed_name() {
 
 #[test]
 fn test_describe_tools_result_flags_unknown_name() {
-    let result = build_describe_tools_result(&backend_tools(), &["jira::get_table".to_string(), "jira::not_a_tool".to_string()], "jira");
+    let result = build_describe_tools_result(&backend_tools(), &["jira::get_table".to_string(), "jira::not_a_tool".to_string()], "jira", None);
     assert_eq!(result["isError"], true);
     let texts: Vec<_> = result["content"].as_array().unwrap().iter().map(|b| b["text"].as_str().unwrap()).collect();
     assert!(texts.contains(&"unknown tool: jira::not_a_tool"));
@@ -75,37 +76,51 @@ fn test_describe_tools_result_flags_unknown_name() {
 
 #[test]
 fn test_describe_tools_result_flags_wrong_prefix_as_unknown() {
-    let result = build_describe_tools_result(&backend_tools(), &["expert::get_table".to_string(), "get_table".to_string()], "jira");
+    let result = build_describe_tools_result(&backend_tools(), &["expert::get_table".to_string(), "get_table".to_string()], "jira", None);
     assert_eq!(result["isError"], true);
     let texts: Vec<_> = result["content"].as_array().unwrap().iter().map(|b| b["text"].as_str().unwrap()).collect();
     assert_eq!(texts, vec!["unknown tool: expert::get_table", "unknown tool: get_table"]);
 }
 
 #[test]
+fn test_describe_tools_result_filters_blacklisted_tool() {
+    let filter = mcp_switchboard::config::ToolsFilter {
+        whitelist: vec![],
+        blacklist: vec!["get_table".to_string()],
+    };
+    let result = build_describe_tools_result(&backend_tools(), &["jira::get_table".to_string()], "jira", Some(&filter));
+    assert_eq!(result["isError"], true);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("unknown tool: jira::get_table"));
+}
+
+#[test]
 fn test_describe_tools_call_names_extracts_names() {
-    let message = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": DESCRIBE_TOOLS_NAME, "arguments": {"names": ["jira::get_table"]}},
-    });
+    let message = jsonrpc_request(
+        Some(&json!(1)),
+        "tools/call",
+        Some(json!({"name": DESCRIBE_TOOLS_NAME, "arguments": {"names": ["jira::get_table"]}}))
+    );
     assert_eq!(describe_tools_call_names(&message), Some(vec!["jira::get_table".to_string()]));
 }
 
 #[test]
 fn test_describe_tools_call_names_ignores_other_tools() {
-    let message = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": CALL_TOOL_NAME, "arguments": {}}});
+    let message = jsonrpc_request(
+        Some(&json!(1)),
+        "tools/call",
+        Some(json!({"name": CALL_TOOL_NAME, "arguments": {}}))
+    );
     assert_eq!(describe_tools_call_names(&message), None);
 }
 
 #[test]
 fn test_rewrite_call_tool_request_substitutes_real_name_and_arguments() {
-    let mut message = json!({
-        "jsonrpc": "2.0",
-        "id": 42,
-        "method": "tools/call",
-        "params": {"name": CALL_TOOL_NAME, "arguments": {"name": "jira::get_table", "arguments": {"x": 1}}},
-    });
+    let mut message = jsonrpc_request(
+        Some(&json!(42)),
+        "tools/call",
+        Some(json!({"name": CALL_TOOL_NAME, "arguments": {"name": "jira::get_table", "arguments": {"x": 1}}}))
+    );
     let real_name = rewrite_call_tool_request(&mut message, "jira");
     assert_eq!(real_name, Some("get_table".to_string()));
     assert_eq!(message["params"]["name"], "get_table");
@@ -114,73 +129,71 @@ fn test_rewrite_call_tool_request_substitutes_real_name_and_arguments() {
 
 #[test]
 fn test_rewrite_call_tool_request_defaults_missing_arguments_to_empty_dict() {
-    let mut message = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": CALL_TOOL_NAME, "arguments": {"name": "jira::get_scalar"}},
-    });
+    let mut message = jsonrpc_request(
+        Some(&json!(1)),
+        "tools/call",
+        Some(json!({"name": CALL_TOOL_NAME, "arguments": {"name": "jira::get_scalar"}}))
+    );
     rewrite_call_tool_request(&mut message, "jira");
     assert_eq!(message["params"]["arguments"], json!({}));
 }
 
 #[test]
 fn test_rewrite_call_tool_request_ignores_other_tools() {
-    let mut message = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": DESCRIBE_TOOLS_NAME, "arguments": {"names": []}},
-    });
+    let mut message = jsonrpc_request(
+        Some(&json!(1)),
+        "tools/call",
+        Some(json!({"name": DESCRIBE_TOOLS_NAME, "arguments": {"names": []}}))
+    );
     assert_eq!(rewrite_call_tool_request(&mut message, "jira"), None);
 }
 
 #[test]
 fn test_rewrite_call_tool_request_rejects_name_with_wrong_prefix() {
-    let mut message = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": CALL_TOOL_NAME, "arguments": {"name": "expert::get_table", "arguments": {}}},
-    });
+    let mut message = jsonrpc_request(
+        Some(&json!(1)),
+        "tools/call",
+        Some(json!({"name": CALL_TOOL_NAME, "arguments": {"name": "expert::get_table", "arguments": {}}}))
+    );
     assert_eq!(rewrite_call_tool_request(&mut message, "jira"), None);
 }
 
 #[test]
 fn test_call_tool_target_name_returns_unprefixed_name() {
-    let message = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": CALL_TOOL_NAME, "arguments": {"name": "jira::get_table", "arguments": {}}},
-    });
+    let message = jsonrpc_request(
+        Some(&json!(1)),
+        "tools/call",
+        Some(json!({"name": CALL_TOOL_NAME, "arguments": {"name": "jira::get_table", "arguments": {}}}))
+    );
     assert_eq!(call_tool_target_name(&message, "jira"), Some("get_table".to_string()));
 }
 
 #[test]
 fn test_call_tool_target_name_rejects_wrong_prefix() {
-    let message = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": CALL_TOOL_NAME, "arguments": {"name": "expert::get_table", "arguments": {}}},
-    });
+    let message = jsonrpc_request(
+        Some(&json!(1)),
+        "tools/call",
+        Some(json!({"name": CALL_TOOL_NAME, "arguments": {"name": "expert::get_table", "arguments": {}}}))
+    );
     assert_eq!(call_tool_target_name(&message, "jira"), None);
 }
 
 #[test]
 fn test_call_tool_target_name_ignores_other_tools() {
-    let message = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": DESCRIBE_TOOLS_NAME, "arguments": {}}});
+    let message = jsonrpc_request(
+        Some(&json!(1)),
+        "tools/call",
+        Some(json!({"name": DESCRIBE_TOOLS_NAME, "arguments": {}}))
+    );
     assert_eq!(call_tool_target_name(&message, "jira"), None);
 }
 
 #[test]
 fn test_rewrite_call_tool_request_rejects_unprefixed_name() {
-    let mut message = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": CALL_TOOL_NAME, "arguments": {"name": "get_table", "arguments": {}}},
-    });
+    let mut message = jsonrpc_request(
+        Some(&json!(1)),
+        "tools/call",
+        Some(json!({"name": CALL_TOOL_NAME, "arguments": {"name": "get_table", "arguments": {}}}))
+    );
     assert_eq!(rewrite_call_tool_request(&mut message, "jira"), None);
 }
