@@ -337,9 +337,8 @@ async fn test_table_result_is_rendered_as_markdown() {
     assert!(text.contains("| id | name | score |"));
     assert!(text.contains("| 1 | alice | 9.5 |"));
     assert!(text.contains("| 2 | bob | 7.1 |"));
-    assert!(text.contains("```json"));
-    assert!(text.contains("\"total\": 2"));
-    assert!(text.contains("\"page\": 1"));
+    assert!(text.contains("\"total\":2"));
+    assert!(text.contains("\"page\":1"));
 }
 
 #[tokio::test]

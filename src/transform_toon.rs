@@ -5,6 +5,7 @@
 //! without losing semantic object structure visibility for the LLM.
 
 use serde_json::Value;
+use crate::tabular::{try_extract_tabular, is_empty_cell};
 
 const INDENT: &str = "  ";
 
@@ -103,24 +104,20 @@ fn encode_list_body(key: &str, items: &[Value], depth: usize, lines: &mut Vec<St
         return;
     }
 
-    if let Some(columns) = tabular_columns(items) {
-        let header_parts: Vec<String> = columns.iter().map(|c| format_key(c)).collect();
+    // Use centralized tabular dataset extraction with min_rows: 1, min_cols: 1 for TOON
+    if let Some(dataset) = try_extract_tabular(&serde_json::to_string(items).unwrap_or_default(), 1, 1) {
+        let header_parts: Vec<String> = dataset.columns.iter().map(|c| format_key(c)).collect();
         let header = format!("{{{}}}", header_parts.join(","));
         let lead = if prefix.is_empty() {
-            format!("[{}]{}:", items.len(), header)
+            format!("[{}]{}:", dataset.rows.len(), header)
         } else {
-            format!("{}[{}]{}:", prefix, items.len(), header)
+            format!("{}[{}]{}:", prefix, dataset.rows.len(), header)
         };
         lines.push(format!("{}{}", indent, lead));
 
         let row_indent = INDENT.repeat(depth + 1);
-        for item in items {
-            if let Some(obj) = item.as_object() {
-                let row_values: Vec<String> = columns.iter()
-                    .map(|col| scalar(obj.get(col).unwrap_or(&Value::Null)))
-                    .collect();
-                lines.push(format!("{}{}", row_indent, row_values.join(",")));
-            }
+        for row in dataset.rows {
+            lines.push(format!("{}{}", row_indent, row.join(",")));
         }
         return;
     }
@@ -178,28 +175,6 @@ fn is_scalar(value: &Value) -> bool {
     !value.is_object() && !value.is_array()
 }
 
-fn tabular_columns(items: &[Value]) -> Option<Vec<String>> {
-    if items.is_empty() || !items.iter().all(|v| v.is_object()) {
-        return None;
-    }
-
-    let first_obj = items[0].as_object().unwrap();
-    let first_keys: Vec<String> = first_obj.keys().cloned().collect();
-    let key_set: std::collections::HashSet<_> = first_keys.iter().collect();
-
-    for item in items {
-        let obj = item.as_object().unwrap();
-        if obj.len() != key_set.len() || obj.keys().any(|k| !key_set.contains(k)) {
-            return None;
-        }
-        if obj.values().any(|v| !is_scalar(v)) {
-            return None;
-        }
-    }
-
-    Some(first_keys)
-}
-
 fn format_key(key: &str) -> String {
     if needs_quoting(key) {
         serde_json::to_string(key).unwrap_or_else(|_| key.to_string())
@@ -209,9 +184,12 @@ fn format_key(key: &str) -> String {
 }
 
 fn scalar(value: &Value) -> String {
+    if is_empty_cell(value) {
+        return "".to_string();
+    }
     match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
+        Value::Null => "".to_string(),
+        Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => {
             if needs_quoting(s) {
@@ -238,15 +216,5 @@ fn needs_quoting(text: &str) -> bool {
     if text.chars().any(|c| ",:{}[]\"\n".contains(c)) {
         return true;
     }
-
-    let first = text.chars().next().unwrap();
-    if (first == '-' || first.is_ascii_digit()) && looks_numeric(text) {
-        return true;
-    }
-
     false
-}
-
-fn looks_numeric(text: &str) -> bool {
-    text.parse::<f64>().is_ok()
 }

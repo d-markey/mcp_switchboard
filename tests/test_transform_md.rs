@@ -101,7 +101,7 @@ fn test_missing_keys_become_empty_cells() {
     let markdown = try_convert_json_table(&payload).unwrap();
     assert_eq!(
         markdown,
-        "| id | name |\n| --- | --- |\n| 1 | a |\n| 2 |  |\n"
+        "| id | name |\n| --- | --- |\n| 1 | a |\n| 2 | |\n"
     );
 }
 
@@ -109,35 +109,44 @@ fn test_missing_keys_become_empty_cells() {
 fn test_empty_collections_render_as_empty_cells() {
     let payload = json!([{"id": 1, "tags": []}, {"id": 2, "tags": {}}]).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert_eq!(markdown, "| id | tags |\n| --- | --- |\n| 1 |  |\n| 2 |  |\n");
+    assert_eq!(markdown, "| id | tags |\n| --- | --- |\n| 1 | |\n| 2 | |\n");
 }
 
 #[test]
 fn test_whitespace_only_strings_render_as_empty_cells() {
     let payload = json!([{"id": 1, "note": "   "}, {"id": 2, "note": "\t\n"}]).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert_eq!(markdown, "| id | note |\n| --- | --- |\n| 1 |  |\n| 2 |  |\n");
+    assert_eq!(markdown, "| id | note |\n| --- | --- |\n| 1 | |\n| 2 | |\n");
 }
 
 #[test]
 fn test_pipe_and_newline_escaping() {
-    let payload = json!([{"note": "a|b\nc"}]).to_string();
+    let payload = json!([
+        {"note": "a|b\nc"},
+        {"note": "d|e\rf"}
+    ]).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert_eq!(markdown, "| note |\n| --- |\n| a\\|b<br>c |\n");
+    assert_eq!(markdown, "| note |\n| --- |\n| a\\|b\\nc |\n| d\\|e\\nf |\n");
 }
 
 #[test]
 fn test_column_names_with_pipes_and_newlines_are_escaped() {
-    let payload = json!([{"a|b": 1, "c\nd": 2}]).to_string();
+    let payload = json!([
+        {"a|b": 1, "c\nd": 2},
+        {"a|b": 3, "c\rd": 4}
+    ]).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert_eq!(markdown, "| a\\|b | c<br>d |\n| --- | --- |\n| 1 | 2 |\n");
+    assert_eq!(markdown, "| a\\|b | c\\nd |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n");
 }
 
 #[test]
 fn test_crlf_and_lone_cr_are_normalized_like_newlines() {
-    let payload = json!([{"a": "x\r\ny", "b": "p\rq"}]).to_string();
+    let payload = json!([
+        {"a": "x\r\ny", "b": "p\rq"},
+        {"a": "w\r\nz", "b": "r\ns"}
+    ]).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert_eq!(markdown, "| a | b |\n| --- | --- |\n| x<br>y | p<br>q |\n");
+    assert_eq!(markdown, "| a | b |\n| --- | --- |\n| x\\ny | p\\nq |\n| w\\nz | r\\ns |\n");
 }
 
 #[test]
@@ -230,7 +239,7 @@ fn test_common_shape_with_one_row_missing_several_keys_still_converts() {
     let markdown = try_convert_json_table(&payload).unwrap();
     assert_eq!(
         markdown,
-        "| id | name | score |\n| --- | --- | --- |\n| 1 | a | 9.5 |\n| 2 | b | 7.1 |\n| 3 | c | 8.0 |\n| 4 |  |  |\n"
+        "| id | name | score |\n| --- | --- | --- |\n| 1 | a | 9.5 |\n| 2 | b | 7.1 |\n| 3 | c | 8.0 |\n| 4 | | |\n"
     );
 }
 
@@ -249,8 +258,8 @@ fn test_table_rewrite_min_fill() {
     assert!(result.is_some());
     let table = result.unwrap();
     assert!(table.contains("| a | b | c |"));
-    assert!(table.contains("| 1 | 2 |  |"));
-    assert!(table.contains("|  |  | 3 |"));
+    assert!(table.contains("| 1 | 2 | |"));
+    assert!(table.contains("| | | 3 |"));
 
     // Below 0.5 ratio
     let sparse_data = json!([

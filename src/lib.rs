@@ -8,6 +8,7 @@ pub mod proxy;
 pub mod transform;
 pub mod transform_md_tables;
 pub mod transform_csv;
+pub mod tabular;
 pub mod tool_filter;
 pub mod tool_search;
 pub mod jsonrpc;

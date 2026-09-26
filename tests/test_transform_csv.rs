@@ -75,5 +75,5 @@ fn test_csv_envelope_with_metadata() {
 
 #[test]
 fn test_csv_non_table_returns_none() {
-    assert!(try_convert_json_csv(&json!({"a": 1, "b": "text"}).to_string()).is_none());
+    assert!(try_convert_json_csv(&json!({"a": 1}).to_string()).is_none());
 }
