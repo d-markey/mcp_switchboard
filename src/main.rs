@@ -54,6 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_config = AppConfig::load_from_file(&args.config)?;
 
     // Reuse a single connection pool Client across all requests to optimize socket reuse and lower latency.
+    // Security Posture (per README): No request timeout to backends by design.
+    // Timing out a long-running call is the client/harness's call to make, not the proxy's.
     let client = Client::builder().build()?;
 
     let backends = Arc::new(app_config.servers);
@@ -90,30 +92,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // to securely interact with the proxy across different origins.
     if let Some(cors_cfg) = app_config.cors {
         if !cors_cfg.allow_origins.is_empty() {
-            let cors = if cors_cfg.allow_origins.iter().any(|o| o == "*") {
-                CorsLayer::new()
-                    .allow_origin(AllowOrigin::any())
-                    .allow_methods(AllowMethods::any())
-                    .allow_headers(AllowHeaders::any())
-                    .expose_headers([
-                        "mcp-session-id".parse().unwrap(),
-                        "content-type".parse().unwrap(),
-                    ])
+            let allowed_origin = if cors_cfg.allow_origins.iter().any(|o| o == "*") {
+                AllowOrigin::any()
             } else {
                 let origins: Vec<_> = cors_cfg
                     .allow_origins
                     .iter()
                     .filter_map(|o| o.parse().ok())
                     .collect();
-                CorsLayer::new()
-                    .allow_origin(AllowOrigin::list(origins))
-                    .allow_methods(AllowMethods::any())
-                    .allow_headers(AllowHeaders::any())
-                    .expose_headers([
-                        "mcp-session-id".parse().unwrap(),
-                        "content-type".parse().unwrap(),
-                    ])
+                AllowOrigin::list(origins)
             };
+
+            let cors = CorsLayer::new()
+                .allow_origin(allowed_origin)
+                .allow_methods(AllowMethods::any())
+                .allow_headers(AllowHeaders::any())
+                .expose_headers([
+                    "mcp-session-id".parse().unwrap(),
+                    "content-type".parse().unwrap(),
+                ]);
             app = app.layer(cors);
         }
     }

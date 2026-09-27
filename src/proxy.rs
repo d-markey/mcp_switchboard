@@ -287,6 +287,8 @@ where
 {
     type Rejection = axum::response::Response;
     async fn from_request(req: axum::extract::Request, _state: &S) -> Result<Self, Self::Rejection> {
+        // Security Posture (per README): No request/response size limits by design.
+        // Large payloads are relayed as-is; if a backend and caller are fine exchanging something large, the proxy won't drop it.
         let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
             .await.map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
         Ok(BytesOrString::Bytes(bytes.to_vec()))

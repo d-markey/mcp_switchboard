@@ -2,12 +2,12 @@
 //! into CSV (Tab-Separated Values) format using the centralized tabular engine.
 
 use serde_json::Value;
-use crate::tabular::{try_extract_tabular, TabularDataset};
+use crate::tabular::{try_extract_tabular, TabularDataset, is_empty_cell};
 
 /// Entry point that attempts to transform a string block into a CSV (TSV) layout.
 /// CSV requires at least 2 rows, or 1 row with at least 2 columns.
 pub fn try_convert_json_csv(text: &str) -> Option<String> {
-    let dataset = try_extract_tabular(text, 1, 2)?;
+    let dataset = try_extract_tabular(text, 1, 2, true)?;
     format_csv_dataset(&dataset)
 }
 
@@ -15,13 +15,13 @@ fn format_csv_dataset(dataset: &TabularDataset) -> Option<String> {
     let mut csv = String::new();
 
     // Header row
-    let header_cells: Vec<String> = dataset.columns.iter().map(|k| format_string_cell(k)).collect();
+    let header_cells: Vec<String> = dataset.columns.iter().map(|k| format_string_cell_from_value(&serde_json::Value::String(k.clone()))).collect();
     csv.push_str(&header_cells.join("\t"));
     csv.push('\n');
 
     // Data rows
     for row in &dataset.rows {
-        let row_cells: Vec<String> = row.iter().map(|cell| format_string_cell(cell)).collect();
+        let row_cells: Vec<String> = row.iter().map(|cell| format_string_cell_from_value(cell)).collect();
         csv.push_str(&row_cells.join("\t"));
         csv.push('\n');
     }
@@ -29,9 +29,7 @@ fn format_csv_dataset(dataset: &TabularDataset) -> Option<String> {
     if let Some(meta) = &dataset.metadata {
         if !is_empty_object(meta) {
             csv.push('\n');
-            let meta_str = serde_json::to_string_pretty(meta).unwrap_or_default();
-            let fence = get_fence_for_content(&meta_str);
-            csv.push_str(&format!("{}json\n{}\n{}\n", fence, meta_str, fence));
+            csv.push_str(&serde_json::to_string_pretty(meta).unwrap_or_default());
         }
     }
 
@@ -45,15 +43,32 @@ fn is_empty_object(v: &Value) -> bool {
     }
 }
 
-fn format_string_cell(s: &str) -> String {
-    let needs_quote = needs_quoting(s);
+fn format_string_cell_from_value(val: &Value) -> String {
+    if is_empty_cell(val) {
+        return "".to_string();
+    }
+    let s = match val {
+        Value::Null => "".to_string(),
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Array(arr) => {
+            let json_str = serde_json::to_string(arr).unwrap_or_default();
+            if json_str.starts_with('[') && json_str.ends_with(']') {
+                let trimmed = &json_str[1..json_str.len()-1];
+                trimmed.trim().to_string()
+            } else {
+                json_str
+            }
+        }
+        Value::Object(obj) => {
+            serde_json::to_string(obj).unwrap_or_default()
+        }
+    };
 
-    let escaped = s
-        .replace('\r', "\\r")
-        .replace('\n', "\\n")
-        .replace('\t', "\\t");
+    let escaped = s;
 
-    if needs_quote {
+    if needs_quoting(&escaped) {
         format!("\"{}\"", escaped.replace('"', "\"\""))
     } else {
         escaped
@@ -61,26 +76,5 @@ fn format_string_cell(s: &str) -> String {
 }
 
 fn needs_quoting(text: &str) -> bool {
-    text.chars().any(|c| c == '"' || c == ',' || c == ';' || c.is_whitespace())
-}
-
-fn get_fence_for_content(content: &str) -> String {
-    let mut max_backticks = 0;
-    let mut current_backticks = 0;
-    for c in content.chars() {
-        if c == '`' {
-            current_backticks += 1;
-        } else {
-            if current_backticks > max_backticks {
-                max_backticks = current_backticks;
-            }
-            current_backticks = 0;
-        }
-    }
-    if current_backticks > max_backticks {
-        max_backticks = current_backticks;
-    }
-
-    let n = std::cmp::max(3, max_backticks + 1);
-    "`".repeat(n)
+    text.chars().any(|c| c == '"' || c == ',' || c == ';' || c.is_whitespace() || c == '\n' || c == '\r' || c == '\t')
 }

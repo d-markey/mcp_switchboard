@@ -40,6 +40,7 @@ fn test_tabular_array_with_key() {
     let output = try_convert_toon(input).unwrap();
     assert!(output.contains("users[2]{id,role}:"));
     assert!(output.contains("  1,admin"));
+    assert!(output.contains("  2,user"));
 }
 
 #[test]

@@ -41,15 +41,9 @@ fn parse(text: &str) -> Option<Value> {
 }
 
 fn parse_jsonl(text: &str) -> Option<Value> {
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() < 2 {
+    let rows = crate::tabular::parse_jsonl(text)?;
+    if rows.len() < 2 {
         return None;
-    }
-
-    let mut rows = Vec::new();
-    for line in lines {
-        let val: Value = serde_json::from_str(line).ok()?;
-        rows.push(val);
     }
     Some(Value::Array(rows))
 }
@@ -104,8 +98,8 @@ fn encode_list_body(key: &str, items: &[Value], depth: usize, lines: &mut Vec<St
         return;
     }
 
-    // Use centralized tabular dataset extraction with min_rows: 1, min_cols: 1 for TOON
-    if let Some(dataset) = try_extract_tabular(&serde_json::to_string(items).unwrap_or_default(), 1, 1) {
+    // Use centralized tabular dataset extraction with allow_nested = false for TOON
+    if let Some(dataset) = try_extract_tabular(&serde_json::to_string(items).unwrap_or_default(), 1, 1, false) {
         let header_parts: Vec<String> = dataset.columns.iter().map(|c| format_key(c)).collect();
         let header = format!("{{{}}}", header_parts.join(","));
         let lead = if prefix.is_empty() {
@@ -117,7 +111,8 @@ fn encode_list_body(key: &str, items: &[Value], depth: usize, lines: &mut Vec<St
 
         let row_indent = INDENT.repeat(depth + 1);
         for row in dataset.rows {
-            lines.push(format!("{}{}", row_indent, row.join(",")));
+            let row_scalars: Vec<String> = row.iter().map(scalar).collect();
+            lines.push(format!("{}{}", row_indent, row_scalars.join(",")));
         }
         return;
     }

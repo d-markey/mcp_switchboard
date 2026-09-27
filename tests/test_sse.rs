@@ -89,3 +89,15 @@ async fn test_trailing_partial_event_is_flushed_unmodified() {
     // My process_event should handle it.
     assert_eq!(out, raw);
 }
+
+#[tokio::test]
+async fn test_spaceless_data_prefix() {
+    let raw = b"data:{\"a\":1}\n\n";
+    let out = collect_stream(vec![raw], |data_bytes| {
+        let data = String::from_utf8_lossy(data_bytes);
+        if data == "{\"a\":1}" { "{\"a\":2}".to_string() } else { data.into_owned() }
+    }).await;
+    // Normalized output format puts space after data: per standard convention
+    assert_eq!(out, b"data: {\"a\":2}\n\n");
+}
+

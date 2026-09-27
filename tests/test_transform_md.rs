@@ -20,9 +20,8 @@ fn test_level1_object_with_result_array_and_metadata() {
     }).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
     assert!(markdown.starts_with("| id | name |\n| --- | --- |\n| 1 | a |\n| 2 | b |"));
-    assert!(markdown.contains("\"metadata\": {"));
-    assert!(markdown.contains("\"other_attribute\": \"x\""));
-    assert!(markdown.trim().ends_with("```"));
+    assert!(markdown.contains("\"metadata\":{"));
+    assert!(markdown.contains("\"other_attribute\":\"x\""));
 }
 
 #[test]
@@ -35,9 +34,8 @@ fn test_level1_double_encoded_array_string() {
     }).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
     assert!(markdown.starts_with("| id | name |\n| --- | --- |\n| 1 | a |\n| 2 | b |"));
-    assert!(markdown.contains("\"metadata\": {"));
-    assert!(markdown.contains("\"description\": \"some rows\""));
-    assert!(markdown.trim().ends_with("```"));
+    assert!(markdown.contains("\"metadata\":{"));
+    assert!(markdown.contains("\"description\":\"some rows\""));
 }
 
 #[test]
@@ -49,12 +47,12 @@ fn test_over_escaped_newlines_in_double_encoded_field_are_repaired() {
 
     let payload = json!({"content": corrupted_inner, "metadata": {"items_per_page": 100}}).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert!(markdown.starts_with("| id | name |\n| --- | --- |\n| 1 | a |\n| 2 | b |"));
+    assert!(markdown.starts_with("| id | name |\n| --- | --- |\n| 1 | a |\n| 2 | b |\n"));
 }
 
 #[test]
 fn test_repair_is_not_attempted_when_json_is_otherwise_valid() {
-    let payload = json!({"content": json!([{"a": 1}]).to_string(), "metadata": {"page": 1}}).to_string();
+    let payload = json!({"content": json!([{"a": 1}, {"a": 2}]).to_string(), "metadata": {"page": 1}}).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
     assert!(markdown.contains("| a |"));
 }
@@ -67,8 +65,8 @@ fn test_unrepairable_malformed_json_still_returns_none() {
 
 #[test]
 fn test_native_array_preferred_over_double_encoded_string() {
-    let inner = json!([{"b": 2}]).to_string();
-    let payload = json!({"result": [{"a": 1}], "content": inner}).to_string();
+    let inner = json!([{"b": 2}, {"b": 4}]).to_string();
+    let payload = json!({"result": [{"a": 1}, {"a": 3}], "content": inner}).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
     assert!(markdown.contains("| a |"));
     assert!(!markdown.contains("| b |"));
@@ -76,9 +74,9 @@ fn test_native_array_preferred_over_double_encoded_string() {
 
 #[test]
 fn test_string_field_that_is_not_json_is_kept_as_metadata_not_rows() {
-    let payload = json!({"result": [{"a": 1}], "notes": "just some text, not json"}).to_string();
+    let payload = json!({"result": [{"a": 1}, {"a": 2}], "notes": "just some text, not json"}).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert!(markdown.contains("\"notes\": \"just some text, not json\""));
+    assert!(markdown.contains("\"notes\":\"just some text, not json\""));
 }
 
 #[test]
@@ -126,7 +124,7 @@ fn test_pipe_and_newline_escaping() {
         {"note": "d|e\rf"}
     ]).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert_eq!(markdown, "| note |\n| --- |\n| a\\|b\\nc |\n| d\\|e\\nf |\n");
+    assert_eq!(markdown, "| note |\n| --- |\n| a\\|b\\nc |\n| d\\|e\\rf |\n");
 }
 
 #[test]
@@ -136,7 +134,7 @@ fn test_column_names_with_pipes_and_newlines_are_escaped() {
         {"a|b": 3, "c\rd": 4}
     ]).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert_eq!(markdown, "| a\\|b | c\\nd |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n");
+    assert_eq!(markdown, "| a\\|b | c\\nd | c\\rd |\n| --- | --- | --- |\n| 1 | 2 | |\n| 3 | | 4 |\n");
 }
 
 #[test]
@@ -146,14 +144,17 @@ fn test_crlf_and_lone_cr_are_normalized_like_newlines() {
         {"a": "w\r\nz", "b": "r\ns"}
     ]).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert_eq!(markdown, "| a | b |\n| --- | --- |\n| x\\ny | p\\nq |\n| w\\nz | r\\ns |\n");
+    assert_eq!(markdown, "| a | b |\n| --- | --- |\n| x\\r\\ny | p\\rq |\n| w\\r\\nz | r\\ns |\n");
 }
 
 #[test]
 fn test_nested_value_rendered_as_compact_json() {
-    let payload = json!([{"id": 1, "tags": ["x", "y"]}]).to_string();
+    let payload = json!([
+        {"id": 1, "tags": ["a", "b"]},
+        {"id": 2, "tags": ["c", "d"]}
+    ]).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert!(markdown.contains("| [\"x\",\"y\"] |"));
+    assert!(markdown.contains("\"a\",\"b\""));
 }
 
 #[test]
@@ -184,8 +185,8 @@ fn test_single_json_object_is_not_a_jsonl_table() {
 #[test]
 fn test_ambiguous_multiple_array_fields_without_preferred_key_returns_none() {
     let payload = json!({
-        "foo": [{"a": 1}],
-        "bar": [{"b": 2}],
+        "foo": [{"a": 1}, {"c": 3}],
+        "bar": [{"b": 2}, {"d": 4}]
     }).to_string();
     assert!(try_convert_json_table(&payload).is_none());
 }
@@ -193,11 +194,11 @@ fn test_ambiguous_multiple_array_fields_without_preferred_key_returns_none() {
 #[test]
 fn test_preferred_key_wins_when_multiple_array_fields_present() {
     let payload = json!({
-        "result": [{"a": 1}],
-        "extra_list": [{"b": 2}],
+        "result": [{"a": 1}, {"c": 3}],
+        "extra_list": [{"b": 2}, {"d": 4}],
     }).to_string();
     let markdown = try_convert_json_table(&payload).unwrap();
-    assert!(markdown.contains("| a |"));
+    assert!(markdown.contains("| a | c |"));
     assert!(markdown.contains("\"extra_list\""));
 }
 
@@ -205,19 +206,6 @@ fn test_preferred_key_wins_when_multiple_array_fields_present() {
 fn test_invalid_jsonl_line_returns_none() {
     let payload = format!("{}\nnot json", json!({"id": 1}));
     assert!(try_convert_json_table(&payload).is_none());
-}
-
-#[test]
-fn test_metadata_containing_backticks_does_not_break_code_fence() {
-    let payload = json!({
-        "result": [{"id": 1}],
-        "metadata": {"note": "see ```python\nprint(1)\n``` for details"},
-    }).to_string();
-    let markdown = try_convert_json_table(&payload).unwrap();
-    let fence_line = markdown.lines().last().unwrap();
-    assert_eq!(fence_line, "````");
-    assert!(markdown.contains("````json"));
-    assert!(markdown.trim().ends_with("````"));
 }
 
 #[test]

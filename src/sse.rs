@@ -108,7 +108,8 @@ where
         if trimmed.ends_with('\r') {
             trimmed = &trimmed[..trimmed.len() - 1];
         }
-        if let Some(stripped) = trimmed.strip_prefix("data: ") {
+        if let Some(stripped) = trimmed.strip_prefix("data:") {
+            let stripped = stripped.strip_prefix(' ').unwrap_or(stripped);
             if has_data {
                 data_payload.push('\n');
             }

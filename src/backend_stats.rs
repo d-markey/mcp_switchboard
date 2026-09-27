@@ -91,13 +91,14 @@ impl BackendStatsRegistry {
     }
 
     pub fn get_info(&self, name: &str) -> Option<BackendHealthInfo> {
-        self.inner.get(name).map(|v| {
-            let stats = v.value();
-            BackendHealthInfo {
-                status: stats.status.read().unwrap().clone(),
-                tools: stats.tools.read().unwrap().clone(),
-                exposed_tools: stats.exposed_tools.read().unwrap().clone(),
-            }
+        let stats = self.inner.get(name).map(|v| v.value().clone())?;
+        let status = stats.status.read().unwrap().clone();
+        let tools = stats.tools.read().unwrap().clone();
+        let exposed_tools = stats.exposed_tools.read().unwrap().clone();
+        Some(BackendHealthInfo {
+            status,
+            tools,
+            exposed_tools,
         })
     }
 
